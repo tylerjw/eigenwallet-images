@@ -1,0 +1,99 @@
+name: build
+
+on:
+  push:
+    branches:
+      - 'release/*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 4.5.0). Upstream images use this directly; swap-cli uses patches/$version-headless-taker on the fork.'
+        required: true
+        default: '4.5.0'
+      image_tag:
+        description: 'Image tag to publish (default: same as version)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build ${{ matrix.component.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - name: asb
+            dockerfile: swap-asb/Dockerfile
+            source: upstream
+          - name: asb-controller
+            dockerfile: swap-controller/Dockerfile
+            source: upstream
+          - name: rendezvous-node
+            dockerfile: libp2p-rendezvous-node/Dockerfile
+            source: upstream
+          - name: swap-cli
+            dockerfile: Dockerfile.swap-cli
+            source: fork
+    steps:
+      - name: Resolve version, repo, and image tag
+        id: refs
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # branch like release/4.5.0 -> version 4.5.0
+            version="${GITHUB_REF#refs/heads/release/}"
+            image_tag="$version"
+          else
+            version="${{ inputs.version }}"
+            image_tag="${{ inputs.image_tag }}"
+            if [ -z "$image_tag" ]; then image_tag="$version"; fi
+          fi
+
+          if [ "${{ matrix.component.source }}" = "fork" ]; then
+            repo="https://github.com/tylerjw/eigen-patches.git"
+            ref="patches/${version}-headless-taker"
+          else
+            repo="https://github.com/eigenwallet/core.git"
+            ref="$version"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Building $repo @ $ref -> ghcr.io/${{ github.repository_owner }}/eigenwallet-${{ matrix.component.name }}:$image_tag"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.refs.outputs.repo }}#${{ steps.refs.outputs.ref }}
+          file: ${{ matrix.component.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/eigenwallet-${{ matrix.component.name }}:${{ steps.refs.outputs.image_tag }}
+            ghcr.io/${{ github.repository_owner }}/eigenwallet-${{ matrix.component.name }}:latest
+          cache-from: type=gha,scope=${{ matrix.component.name }}
+          cache-to: type=gha,scope=${{ matrix.component.name }},mode=max
+          provenance: false
+
+      - name: Print pinnable digest
+        run: |
+          echo "Pin in homelab as:"
+          echo "  ghcr.io/${{ github.repository_owner }}/eigenwallet-${{ matrix.component.name }}:${{ steps.refs.outputs.image_tag }}@${{ steps.build.outputs.digest }}"
