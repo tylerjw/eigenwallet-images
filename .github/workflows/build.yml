@@ -58,10 +58,10 @@ jobs:
           fi
 
           if [ "${{ matrix.component.source }}" = "fork" ]; then
-            repo="https://github.com/tylerjw/eigen-patches.git"
+            repo="tylerjw/eigen-patches"
             ref="patches/${version}-headless-taker"
           else
-            repo="https://github.com/eigenwallet/core.git"
+            repo="eigenwallet/core"
             ref="$version"
           fi
 
@@ -70,6 +70,21 @@ jobs:
           echo "repo=$repo" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Building $repo @ $ref -> ghcr.io/${{ github.repository_owner }}/eigenwallet-${{ matrix.component.name }}:$image_tag"
+
+      # Check out the source locally with submodules so the build uses a local
+      # context. monero-sys's build.rs (4.11+) reconstructs patched files from
+      # their pristine blobs via `git show HEAD:<path>`, which needs the monero
+      # submodule to be a real git repo. BuildKit's remote-git context
+      # (context: <url>#<ref>) leaves broken submodule gitlinks, so that path
+      # fails — hence a real checkout + `context: .`. Keep `.git` out of
+      # .dockerignore so the COPY carries the submodule gitdirs into the build.
+      - name: Checkout source (${{ steps.refs.outputs.repo }}@${{ steps.refs.outputs.ref }})
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.refs.outputs.repo }}
+          ref: ${{ steps.refs.outputs.ref }}
+          submodules: recursive
+          fetch-depth: 1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -85,7 +100,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: ${{ steps.refs.outputs.repo }}#${{ steps.refs.outputs.ref }}
+          context: .
           file: ${{ matrix.component.dockerfile }}
           push: true
           platforms: linux/amd64
